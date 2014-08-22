@@ -21,6 +21,7 @@ module Controller
 , MovableEntity
 , DefaultWorld
 , DefaultWorldDelta (..)
+, DefaultDeltaEvent (..)
 , DeriveDefaultWorldPred (..)
 , DeriveDefaultWorld (..)
 , HTrue
@@ -72,10 +73,13 @@ type WorldWire w a b = W.Wire Time () (WorldMonad w) a b
 
 
 type EntityId = Int
+     
+type family InvDeltaEvent d
 
 class World w where
     type Delta d :: * -> *
-    applyDelta :: Free (Delta w) n -> State w ()
+    type DeltaEvent de
+    applyDelta :: Free (Delta w) n -> State w [DeltaEvent w]
     -- | Initialize a new world (the first parameter is a dummy parameter for the inference engine)
 --    newWorld :: w -> w
     -- | Return the starting wire for the world (the first parameter is a dummy parameter for the inference engine)
@@ -122,8 +126,8 @@ class World w => Component w c where
 instance Monoid Float where
          mempty = 0.0
          mappend a b = a + b
-newtype Position = Position (Float, Float) deriving (Show, Monoid, Generic)
-newtype Rotation = Rotation Float deriving (Show, Monoid, Generic)
+newtype Position = Position (Float, Float) deriving (Show, Monoid, Generic, Eq, Ord)
+newtype Rotation = Rotation Float deriving (Show, Monoid, Generic, Eq, Ord)
 
 instance NFData Position where rnf = genericRnf
 instance NFData Rotation where rnf = genericRnf
@@ -144,6 +148,12 @@ instance NFData DefaultWorld where rnf = genericRnf
 
 type EntityName = String
 newtype MovableEntity s = MovableEntity EntityId deriving (Show)
+        
+data DefaultDeltaEvent =
+  EventMove EntityId Position
+  | EventRotate EntityId Rotation
+  | EventSpawn EntityId EntityName
+  deriving (Show, Eq, Ord)
 
 data DefaultWorldDelta next =
     Move !EntityId !Position !next
@@ -211,31 +221,31 @@ liftS f = do
 applyDelta' :: (DeriveDefaultWorld w)
             => w -> DefaultWorldDelta (Free (Delta w) a)
             -- -> (Free DefaultWorldDelta a -> Free (Delta w) a)
-            -> State w ()
-applyDelta' _ ((Move eId pos n)) = do
+            -> State w [DeltaEvent w]
+applyDelta' w ((Move eId pos n)) = do
            liftS $ wPositions.at eId._Just %= mappend pos
-           applyDelta (n)
+           fmap (getDefaultDeltaEvent w (EventMove eId pos) :) $ applyDelta (n)
 
 applyDelta' _ ((SetPosition eId pos n)) = do
            liftS $ wPositions.at eId .= Just pos
            applyDelta (n)
 
-applyDelta' _ ((Rotate eId rot n)) = do
+applyDelta' w ((Rotate eId rot n)) = do
            liftS $ wRotations.at eId._Just %= mappend rot
-           applyDelta (n)
+           fmap (getDefaultDeltaEvent w (EventRotate eId rot) :) $ applyDelta (n)
 
 applyDelta' _ ((SetRotation eId rot n)) = do
            liftS $ wRotations.at eId .= Just rot
            applyDelta (n)
 
-applyDelta' _ ((SpawnMovable name pos rot g)) = do
+applyDelta' w ((SpawnMovable name pos rot g)) = do
   eId <- liftS $ do
            eId <- spawnEntity
            wEntityNames.at name .= Just eId
            wPositions.at eId .= Just pos
            wRotations.at eId .= Just rot
            return eId
-  applyDelta ((g eId))
+  fmap (getDefaultDeltaEvent w (EventSpawn eId name) :) $ applyDelta ((g eId))
 
 applyDelta' _ (GetEntity name g) = do
   eId <- liftS $ use $ wEntityNames.at name
@@ -254,11 +264,12 @@ applyDelta' _ (GetComp eId g) = do
   let x = getComponent undefined w
   applyDelta (g x)
 
-
+type instance InvDeltaEvent (DefaultDeltaEvent) = DefaultWorld
 instance World DefaultWorld where
     type Delta DefaultWorld = DefaultWorldDelta
+    type DeltaEvent DefaultWorld = DefaultDeltaEvent
     applyDelta (Free f) = applyDelta' (undefined::DefaultWorld) f
-    applyDelta (Pure a) = return ()
+    applyDelta (Pure a) = return []
 
 -- instance World WorldExtends where
 --     type Delta WorldExtends = Free WorldExtendsDelta
@@ -285,11 +296,13 @@ class (World w, Functor (Delta w)) => DeriveDefaultWorld w where
       getDefaultWorld :: w -> DefaultWorld
       getDefaultWorldL :: Lens' w DefaultWorld
       getDefaultDelta :: w -> Free (Delta DefaultWorld) a -> Free (Delta w) a
+      getDefaultDeltaEvent :: w -> DefaultDeltaEvent -> DeltaEvent w
 
 instance DeriveDefaultWorld DefaultWorld where
     getDefaultWorld = id
     getDefaultWorldL = lens id const --(\w1 w2 -> w2) -- FIXME: is this the right one?
     getDefaultDelta _ = id
+    getDefaultDeltaEvent _ = id
 
 class Component' flag w c where
     type EntityComp' flag w c :: * -> *

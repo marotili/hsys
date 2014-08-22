@@ -22,13 +22,14 @@ where
 -- *  so adding one big object may slow down the query
 
 --import qualified Data.Octree as O
-import qualified Control.Arrow              as A
+import           Debug.Trace
+import qualified Control.Arrow as A
 import           Control.Lens
 import           Control.Monad.State.Strict
-import qualified Data.Map.Strict            as Map
-import           Data.Octree                (Vector3 (..))
-import qualified Data.SpacePart.AABB        as SP
-import qualified Data.SpacePart.QuadTree    as SP
+import qualified Data.Map.Strict as Map
+import           Data.Octree (Vector3 (..))
+import qualified Data.SpacePart.AABB as SP
+import qualified Data.SpacePart.QuadTree as SP
 import           GHC.Float
 
 type ObjectId = Int
@@ -198,27 +199,23 @@ octreeQueryObject oId = do
 	--	goNeedsUpdate .= False
 
 	queryObject' <- use goUpdatableObjects -- . at oId)
-	let Just queryObject = queryObject'^.at oId
-	----let points = queryObject^..octreeObjectPoints.traverse._1
-	--let bound = SP.boundary_square queryObject
-	--octree <- use goCachedOctree
-	--let results = traceShow ("query") $ SP.query bound octree
+	let mQueryObject = queryObject'^.at oId
+        case mQueryObject of
+          Nothing -> return []
+          Just queryObject -> do
+            statics <- use goStaticObjects
+            objs <- use goUpdatableObjects
 
-	--return $ filter (/= oId) $ map (^.ooObjectId) $ traceShow (results) results
+            let intersections = filter (\obj -> obj^.ooObjectId /= oId && (obj^.ooBoundary) `boundariesIntersect` (queryObject^.ooBoundary))
+                    $ map snd $ Map.toList statics ++ Map.toList objs
 
-	statics <- use goStaticObjects
-	objs <- use goUpdatableObjects
+            let searchBoundaryPoints = queryObject^..ooRealBoundary.rbLines.traverse.vectorXY
 
-	let intersections = filter (\obj -> obj^.ooObjectId /= oId && (obj^.ooBoundary) `boundariesIntersect` (queryObject^.ooBoundary))
-		$ map snd $ Map.toList statics ++ Map.toList objs
+            let realIntersections = filter (\obj ->
+                            any (\p -> pointInConvexHull p (obj^..ooRealBoundary.rbLines.traverse.vectorXY)) searchBoundaryPoints
+                    ) intersections
 
-	let searchBoundaryPoints = queryObject^..ooRealBoundary.rbLines.traverse.vectorXY
-
-	let realIntersections = filter (\obj ->
-			all (\p -> pointInConvexHull p (obj^..ooRealBoundary.rbLines.traverse.vectorXY)) searchBoundaryPoints
-		) intersections
-
-	return $ map (^.ooObjectId) realIntersections
+            return $ map (^.ooObjectId) realIntersections
 
 
 -- | list of points to list of lines
@@ -236,14 +233,13 @@ pointInConvexHull (px, py) convexHullLines = isInside
 
 
 -- |  tests
-testCollision :: [ObjectId]
-testCollision = evalState (do
+testCollision i = evalState (do
 		octreeAddStatics
 			[
 			]
 		octreeUpdate
-			[ (0, [(35.0, -220.0), (65.0, -190.0)])
-			, (1, [(185.0, -70.0), (215.0, -40.0)])
+			[ (0, [(35.0, -191.0), (65.0, -191.0), (65.0, -220.0), (35.0, -220.0)])
+			, (1, [(34.0, -190.0), (100.0, -190.0), (100.0, -220.0), (34.0, -220.0)])
 			, (2, [(184.241058, -170.252975), (214.241058, -140.252975)])
 			, (3, [(185.0, -270.0), (215.0, -240.0)])
 			, (4, [(936.0, -960.0), (940.0, -956.0)])
@@ -254,7 +250,7 @@ testCollision = evalState (do
 			, (6, [(0, 0.95), (1, 1)]) -- does not work
 			]
 
-		octreeQueryObject 2
+		octreeQueryObject i
 	) newOctree
 
 --_boundaryDiameter :: Boundary -> Double
