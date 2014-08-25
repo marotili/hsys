@@ -15,6 +15,7 @@ module Input.InputSodium
 , Time(..)
 , syncInput
 , InputFRP
+, Input
 , while, runWhenEvent', replace, both
 )
 
