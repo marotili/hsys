@@ -77,8 +77,8 @@ type EntityId = Int
 type family InvDeltaEvent d
 
 class World w where
-    type Delta d :: * -> *
-    type DeltaEvent de
+    type Delta w :: * -> *
+    type DeltaEvent w
     applyDelta :: Free (Delta w) n -> State w [DeltaEvent w]
     -- | Initialize a new world (the first parameter is a dummy parameter for the inference engine)
 --    newWorld :: w -> w
