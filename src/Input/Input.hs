@@ -1,5 +1,4 @@
 {-# LANGUAGE Arrows                #-}
-{-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE ExplicitForAll        #-}
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -21,9 +20,12 @@ module Input.Input
     , keyDown
 
     , makeXboxController
+    , newXboxController
+    , xboxControllerDiff
 
     , InputWire
     , UserInput
+    , XCButtons
     , newUserInput
     -- | TODO: move this somewhere else
     , untilV
@@ -66,17 +68,11 @@ import           Linear
 
 import           Control.Lens
 
-import           Control.DeepSeq
-import           Control.DeepSeq.Generics  (genericRnf)
-import           GHC.Generics
-
 data XCButtons =
 	  XC'A |XC'B | XC'X | XC'Y
 	| XC'RB | XC'LB | XCHome | XCBack | XCStart
 	| XC'LS | XC'RS
-	deriving (Show, Ord, Eq, Generic)
-
-instance NFData XCButtons where rnf = genericRnf
+	deriving (Show, Ord, Eq)
 
 defaultButtons :: [XCButtons]
 defaultButtons = [XC'A, XC'B, XC'X, XC'Y, XC'LB, XC'RB, XCBack, XCStart, XCHome, XC'LS, XC'RS]
@@ -88,8 +84,8 @@ makeSet ls = foldr (\(s, b) mySet -> if s == GLFW.JoystickButtonState'Pressed th
 makeXboxController :: Double -> Double -> Double -> Double -> Double -> Double -> Double -> Double -> [GLFW.JoystickButtonState] -> XboxController
 makeXboxController lt rt xl yl xr yr px py buttons = XboxController { _xcLeftTrigger = lt
    , _xcRightTrigger = rt
-   , _xcLeftStick = (if abs xl < 0.3 then 0 else xl, if abs yl < 0.3 then 0 else yl)
-   , _xcRightStick = (if abs xr < 0.3 then 0 else xr, if abs yr < 0.3 then 0 else yr)
+   , _xcLeftStick = (if abs xl < 0.15 then 0 else -xl, if abs yl < 0.15 then 0 else -yl)
+   , _xcRightStick = (if abs xr < 0.15 then 0 else -xr, if abs yr < 0.15 then 0 else -yr)
    , _xcPad = (px, py)
    , _xcButtons = makeSet buttons
    }
@@ -101,12 +97,9 @@ data XboxController = XboxController
     , _xcRightStick   :: !(Double, Double)
     , _xcPad          :: !(Double, Double)
     , _xcButtons      :: !(Set.Set XCButtons)
-    } deriving (Show, Generic)
-
-instance NFData XboxController where rnf = genericRnf
-instance NFData GLFW.Key where rnf key = key `seq` ()
-instance NFData GLFW.MouseButton where rnf key = key `seq` ()
-
+    } deriving (Show)
+    
+   
 newXboxController :: XboxController
 newXboxController = XboxController
 	{ _xcLeftTrigger = 0
@@ -118,16 +111,34 @@ newXboxController = XboxController
 	}
 
 makeLenses ''XboxController
+    
+eps :: Double
+eps = 0.01
 
+-- | returns absoulte changes
+xboxControllerDiff :: XboxController -> XboxController 
+                   -> (Maybe Double, Maybe Double, Maybe (Double, Double), Maybe (Double, Double)
+                      ,Maybe (Double, Double), Set.Set XCButtons, Set.Set XCButtons)
+                   
+xboxControllerDiff oldXC newXC = (leftTrigger, rightTrigger, leftStick, rightStick, Nothing, unpressedButtons, pressedButtons)
+  where
+    leftTrigger = if abs (oldXC^.xcLeftTrigger - newXC^.xcLeftTrigger) > eps then Just $ newXC^.xcLeftTrigger else Nothing
+    rightTrigger = if abs (oldXC^.xcRightTrigger - newXC^.xcRightTrigger) > eps then Just $ newXC^.xcRightTrigger else Nothing
+    leftStick = if abs (oldXC^.xcLeftStick._1 - newXC^.xcLeftStick._1) < eps &&
+                     abs (oldXC^.xcLeftStick._2 - newXC^.xcLeftStick._2) < eps then Nothing else Just $ newXC^.xcLeftStick
+    rightStick = if abs (oldXC^.xcRightStick._1 - newXC^.xcRightStick._1) > eps ||
+                     abs (oldXC^.xcRightStick._2 - newXC^.xcRightStick._2) > eps then Just $ newXC^.xcRightStick else Nothing
+    unpressedButtons = Set.difference (oldXC^.xcButtons) (newXC^.xcButtons) 
+    pressedButtons = Set.difference (newXC^.xcButtons) (oldXC^.xcButtons)
+    -- ignore pad
+ 
 -- input data
 data UserInput = UserInput
   { inputKeys         :: !(Set.Set GLFW.Key)
   , inputMouseButtons :: !(Set.Set GLFW.MouseButton)
   , inputMousePos     :: !(Double, Double)
   , inputJoystick     :: !XboxController
-  } deriving (Show, Generic)
-
-instance NFData UserInput where rnf = genericRnf
+  } deriving (Show)
 
 data InputMemory = InputMemory
 	{

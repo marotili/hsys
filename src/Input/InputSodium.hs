@@ -18,6 +18,8 @@ module Input.InputSodium
 , InputFRP
 , Input
 , while, runWhenEvent', replace, both
+, leftTriggerDirection
+, rightTriggerDirection
 )
 
 where
@@ -36,9 +38,14 @@ import           Control.Monad.Reader
 import           Data.Monoid
 import           Control.Monad
 import           Data.List
+import Input.Input hiding (keyUp, keyDown)
                  
 import qualified Data.Set as Set
                  
+       
+data ButtonEvent = ButtonEvent { eButton :: XCButtons
+                               , eButtonState :: Bool
+                               } deriving (Eq, Ord, Show)
        
 data KeyEvent = KeyEvent { eKey :: GLFW.Key
                          , eKeyState :: GLFW.KeyState
@@ -99,7 +106,12 @@ accum2 z efa = do
   return s
   
 data Input = Input
-  { _eKeys :: Event KeyEvent
+  { _inputEKeys :: Event KeyEvent
+  , _inputEMousePos :: Event MousePosEvent
+  , _inputEMouseButtons :: Event MouseButtonEvent
+  , _inputEControllerLeftStick :: Event (Float, Float)
+  , _inputEControllerRightStick :: Event (Float, Float)
+  , _inputEControllerButtons :: Event ButtonEvent
   }
   
 makeLenses ''Input
@@ -117,13 +129,13 @@ keyEvent :: GLFW.Key -> Event KeyEvent -> Event KeyEvent
 keyEvent key = filterE (\(KeyEvent k _) -> k == key)
             
 keyDown :: GLFW.Key -> InputFRP (Event KeyEvent)
-keyDown key = view eKeys >>= return . keyDown' key
+keyDown key = view inputEKeys >>= return . keyDown' key
 keyDown' :: GLFW.Key -> Event KeyEvent -> Event KeyEvent
 keyDown' key = filterE (\(KeyEvent k keyState) -> k == key && keyState == GLFW.KeyState'Pressed)
         
 keyIsDown :: GLFW.Key -> ReaderT Input Reactive (Behavior Bool)
 keyIsDown key = do
-    eK <- view eKeys 
+    eK <- view inputEKeys 
     let ek' = keyEvent key eK
     let eKeyFinal = filterE ((/= GLFW.KeyState'Repeating) . eKeyState) ek'
     lift . hold False . fmap (_keyStateDown . eKeyState) $ eKeyFinal
@@ -140,7 +152,7 @@ both a b = (&&) <$> a <*> b
 replace :: Functor f => a -> f b -> f a
 replace a f = fmap (const a) f
         
-keyUp key = view eKeys >>= return . keyDown' key
+keyUp key = view inputEKeys >>= return . keyDown' key
 keyUp' :: GLFW.Key -> Event KeyEvent -> Event KeyEvent
 keyUp' key = filterE (\(KeyEvent k keyState) -> k == key && keyState == GLFW.KeyState'Released)
         
@@ -153,7 +165,17 @@ runWhenEvent r e = runWhenEvent' (const r) e
              
 runWhenEvent' :: (a -> Reactive b) -> Event a -> Event b
 runWhenEvent' r e = execute $ fmap r e
-         
+              
+leftTriggerDirection :: InputFRP (Behavior (Float, Float))
+leftTriggerDirection = do
+  leftStickEvents <- view inputEControllerLeftStick
+  lift $ hold (0, 0) leftStickEvents
+  
+rightTriggerDirection :: InputFRP (Behavior (Float, Float))
+rightTriggerDirection = do
+  rightStickEvents <- view inputEControllerRightStick
+  lift $ hold (0, 0) rightStickEvents
+
 while :: Behavior Bool -> a -> Reactive (Behavior a) -> Reactive (Behavior a)
 while behTrigger z beh = do
   let b = pure z
@@ -199,16 +221,32 @@ initInput win = do
   (mousePosEvents, pushMousePosEvent) <- sync newEvent
 
   (keyEventChan, mouseButtonEventChan, mousePosEventChan) <- registerCallbacks win
+  
+  (leftStick, pushLeftStick) <- sync newEvent
+  (rightStick, pushRightStick) <- sync newEvent
+  
+  (xc, pushXc) <- sync $ newBehavior newXboxController
 
   --waitQuit <- async $ do
   --  loop win (keyEventChan, mouseButtonEventChan, mousePosEventChan) (pushKeyEvent, pushMouseButtonEvent, pushMousePosEvent)
 
-  return (Input keyEvents, step win (keyEventChan, mouseButtonEventChan, mousePosEventChan) (pushKeyEvent, pushMouseButtonEvent, pushMousePosEvent)) -- (keyEvents, mouseButtonEvents, mousePosEvents))
+  return (Input keyEvents never never leftStick rightStick never, step win (keyEventChan, mouseButtonEventChan, mousePosEventChan) (pushKeyEvent, pushMouseButtonEvent, pushMousePosEvent, pushLeftStick, pushRightStick) (xc, pushXc))
   
-  where step win c@(keyChan, mbChan, mpChan) e@(pushKeyEvent, pushMouseButtonEvent, pushMousePosEvent) = do
+  where step win c@(keyChan, mbChan, mpChan) e@(pushKeyEvent, pushMouseButtonEvent, pushMousePosEvent, pushLeftStick, pushRightStick) (bxc, pushXc) = do
             close <- GLFW.windowShouldClose win
 
             unless close $ do
+              xc <- sync $ sample bxc
+              (xl, yl, lt, xr, yr, rt, px, py, buttons) <- getJoystickData GLFW.Joystick'1
+              let newXc = makeXboxController lt rt xl yl xr yr px py buttons
+              let (_, _, ls, rs, _, _, _) = xboxControllerDiff xc newXc
+              sync $ pushXc newXc
+  
+              case ls of Just (lsx, lsy) -> sync $ pushLeftStick (realToFrac lsx, realToFrac lsy)
+                         Nothing -> return ()
+
+              case rs of Just (rsx, rsy) -> sync $ pushRightStick (realToFrac rsx, realToFrac rsy)
+                         Nothing -> return ()
 
               GLFW.pollEvents
 
@@ -225,21 +263,11 @@ initInput win = do
                 mapM pushMouseButtonEvent $ Set.toList mbEvents
                 mapM pushMousePosEvent $ Set.toList mpEvents
               return ()
-  
--- run :: IO ()
--- run = do
---   GLFW.setErrorCallback $ Just simpleErrorCallback
---   m <- GLFW.init
---   Just win <- GLFW.createWindow 100 100 "" Nothing Nothing
-  
---   (q, input) <- initInput win
---   syncInput input $ do
---     behK <- keyIsDown GLFW.Key'A
---     lift $ listen (updates behK) print
---   wait q
-    
---   GLFW.destroyWindow win
---   GLFW.terminate
 
---   where simpleErrorCallback e s = print $ unwords [show e, show s]
-  
+getJoystickData js = do
+  maxes <- GLFW.getJoystickAxes js
+  Just buttons <- GLFW.getJoystickButtons js
+  return $ case maxes of
+    (Just (x:y:lt:xr:yr:rt:px:py:[])) -> (-x, -y, lt, xr, yr, rt, px, py, buttons)
+    (Just (x:y:_)) -> (-x, -y, 0, 0, 0, 0, 0, 0, buttons)
+    _ -> (0, 0, 0, 0, 0, 0, 0, 0, [])

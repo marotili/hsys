@@ -2,17 +2,20 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies    #-}
 {-# LANGUAGE TypeOperators   #-}
+{-# LANGUAGE Rank2Types   #-}
 module Collision
 ( newOctree
 , newBoundary
 , GameOctree
 , octreeUpdate
+, octreeUpdateInsert
+, octreeObject
 , octreeRemoveObject
 
 , octreeQueryObject
 , goStaticObjects
-, ooRealBoundary
-, rbLines
+, ooPosition
+, ooBaseBoundary
 , vectorXY
 , toFloat
 )
@@ -22,6 +25,7 @@ where
 -- *  so adding one big object may slow down the query
 
 --import qualified Data.Octree as O
+import           Data.Maybe
 import           Debug.Trace
 import qualified Control.Arrow as A
 import           Control.Lens
@@ -72,12 +76,14 @@ newRealBoundary = RealBoundary []
 
 data OctreeObject = OctreeObject
     { _ooObjectId     :: ObjectId
-    , _ooBoundary     :: Boundary
-    , _ooRealBoundary :: RealBoundary
+    , _ooPosition :: (Float, Float)
+    , _ooRotation :: Float
+    , _ooBaseBoundary :: [(Float, Float)] -- ^ convex 
+--    , _ooBoundary     :: Boundary
+--    , _ooRealBoundary :: RealBoundary
     } deriving (Show)
-
 newOctreeObject :: OctreeObject
-newOctreeObject = OctreeObject 0 newBoundary newRealBoundary
+newOctreeObject = OctreeObject 0 (0, 0) 0 [] -- newBoundary newRealBoundary
 
 data GameOctree = GameOctree
     { _goMaxDiameter      :: Double
@@ -87,11 +93,29 @@ data GameOctree = GameOctree
     , _goCachedOctree     :: SP.QuadTree OctreeObject
     , _goNeedsUpdate      :: Bool
     } -- deriving (Show)
+    
+    
 
 makeLenses ''Boundary
 makeLenses ''RealBoundary
 makeLenses ''OctreeObject
 makeLenses ''GameOctree
+     
+ooRealBoundary :: Getter OctreeObject RealBoundary
+ooRealBoundary = to get
+  where get obj = let (x, y) = obj^.ooPosition
+                  in RealBoundary $ map (\(bx, by) -> Vector3 (float2Double $ bx + x)
+                                                              (float2Double $ by + y)
+                                                              0) (obj^.ooBaseBoundary)
+                                                              
+                                                              
+ooBoundary :: Getter OctreeObject Boundary
+ooBoundary = to get
+  where get obj = mkBoundary (obj^.ooPosition) (obj^.ooBaseBoundary)
+
+          
+octreeObject :: ObjectId -> Getter GameOctree (Maybe OctreeObject)
+octreeObject oId = goUpdatableObjects.at oId
 
 -- | test two boundaries for intersection
 boundariesIntersect :: Boundary -> Boundary -> Bool
@@ -152,20 +176,20 @@ instance Show GameOctree where
 		"Num updateable: " ++ show (Map.size $ go^.goUpdatableObjects) ++ "\n"
 
 -- | Update octree with static data
-octreeAddStatics :: [(ObjectId, (Float, Float), (Float, Float))] -> State GameOctree ()
-octreeAddStatics [] = return ()
-octreeAddStatics objects = do
-	mapM_ octreeAddStatic octreeObjects
-	goStaticOctree %= \static -> foldr SP.insert static (octreeObjects^..traverse.octreeObjectPoints)
-	static <- use goStaticOctree
-	goCachedOctree .= static
-	goNeedsUpdate .= True
-	where
-		octreeObjects = map (\(oId, origin, size) -> octreeObjectBox oId origin size) objects
+-- octreeAddStatics :: (Monad m) => [(ObjectId, (Float, Float), (Float, Float))] -> StateT GameOctree m ()
+-- octreeAddStatics [] = return ()
+-- octreeAddStatics objects = do
+-- 	mapM_ octreeAddStatic octreeObjects
+-- 	goStaticOctree %= \static -> foldr SP.insert static (octreeObjects^..traverse.octreeObjectPoints)
+-- 	static <- use goStaticOctree
+-- 	goCachedOctree .= static
+-- 	goNeedsUpdate .= True
+-- 	where
+-- 		octreeObjects = map (\(oId, origin, size) -> octreeObjectBox oId origin size) objects
 
-		octreeAddStatic :: OctreeObject -> State GameOctree ()
-		octreeAddStatic object =
-			goStaticObjects %= Map.insert (object^.ooObjectId) object
+-- 		octreeAddStatic :: (Monad m) => OctreeObject -> StateT GameOctree m ()
+-- 		octreeAddStatic object =
+-- 			goStaticObjects %= Map.insert (object^.ooObjectId) object
 
 -- | remove an object from the octree
 octreeRemoveObject :: ObjectId -> GameOctree -> GameOctree
@@ -174,21 +198,26 @@ octreeRemoveObject oId oldOctree = oldOctree
 	& goStaticObjects %~ Map.delete oId
 	& goNeedsUpdate .~ True
 	--xrn--e
+        
+uncurry3 f (a, b, c) = f a b c
 
--- | update or insert an object
-octreeUpdate :: [(ObjectId, [(Float, Float)])] -> State GameOctree ()
+octreeUpdate :: (Monad m) => [OctreeObject] -> StateT GameOctree m ()
 octreeUpdate [] = return ()
 octreeUpdate objects = do
-	goNeedsUpdate .= True
-	goUpdatableObjects %= \m -> foldr (\obj -> -- update or insert
-			Map.insert (obj^.ooObjectId) obj)
-		m octreeObjects
+  goNeedsUpdate .= True
+  goUpdatableObjects %= Map.union (Map.fromList $ map (\obj -> (obj^.ooObjectId, obj)) objects)
+
+-- | update or insert an object
+octreeUpdateInsert :: (Monad m) => [(ObjectId, (Float, Float), [(Float, Float)])] -> StateT GameOctree m ()
+octreeUpdateInsert [] = return ()
+octreeUpdateInsert objects = do
+        octreeUpdate octreeObjects
 	where
 		octreeObjects :: [OctreeObject]
-		octreeObjects = map (uncurry octreeObjectFromPoints) objects
+		octreeObjects = map (uncurry3 octreeObjectFromPoints) objects
 
 -- | query intersections with object
-octreeQueryObject :: ObjectId -> State GameOctree [ObjectId]
+octreeQueryObject :: (Monad m) => ObjectId -> StateT GameOctree m [ObjectId]
 octreeQueryObject oId = do
 	--needUpdate <- traceShow ("needs update") $ use goNeedsUpdate
 	--Control.Monad.when needUpdate $ do
@@ -233,21 +262,21 @@ pointInConvexHull (px, py) convexHullLines = isInside
 
 
 -- |  tests
-testCollision i = evalState (do
-		octreeAddStatics
-			[
-			]
-		octreeUpdate
-			[ (0, [(35.0, -191.0), (65.0, -191.0), (65.0, -220.0), (35.0, -220.0)])
-			, (1, [(34.0, -190.0), (100.0, -190.0), (100.0, -220.0), (34.0, -220.0)])
-			, (2, [(184.241058, -170.252975), (214.241058, -140.252975)])
-			, (3, [(185.0, -270.0), (215.0, -240.0)])
-			, (4, [(936.0, -960.0), (940.0, -956.0)])
-			, (5, [(0.0, -960.0), (24.0, -24.0)])
-			, (6, [(0.0, -24.0), (960.0, -48.0)])
-			, (7, [(24.0, -960.0), (48.0, -48.0)])
-			, (5, [(0.05, 0.95), (1, 1)]) -- does work
-			, (6, [(0, 0.95), (1, 1)]) -- does not work
+testCollision i = evalStateT (do
+		-- octreeAddStatics
+		-- 	[
+		-- 	]
+		octreeUpdateInsert
+			[ (0, (0, 0), [(35.0, -191.0), (65.0, -191.0), (65.0, -220.0), (35.0, -220.0)])
+			, (1, (0, 0), [(34.0, -190.0), (100.0, -190.0), (100.0, -220.0), (34.0, -220.0)])
+			, (2, (0, 0), [(184.241058, -170.252975), (214.241058, -140.252975)])
+			, (3, (0, 0), [(185.0, -270.0), (215.0, -240.0)])
+			, (4, (0, 0), [(936.0, -960.0), (940.0, -956.0)])
+			, (5, (0, 0), [(0.0, -960.0), (24.0, -24.0)])
+			, (6, (0, 0), [(0.0, -24.0), (960.0, -48.0)])
+			, (7, (0, 0), [(24.0, -960.0), (48.0, -48.0)])
+			, (5, (0, 0), [(0.05, 0.95), (1, 1)]) -- does work
+			, (6, (0, 0), [(0, 0.95), (1, 1)]) -- does not work
 			]
 
 		octreeQueryObject i
@@ -262,42 +291,48 @@ testCollision i = evalState (do
 
 -- creates a boundary that is axis aligned (the real boundary too)
 -- used for tiles etc.
-octreeObjectBox :: ObjectId -> (Float, Float) -> (Float, Float) -> OctreeObject
-octreeObjectBox oId (ox', oy') (dx', dy') = newOctreeObject
-		& ooObjectId .~ oId
-		& ooBoundary .~ boundary
-		& ooRealBoundary .~ realBoundary
-	where
-		[ox, oy, dx, dy] = map float2Double [ox', oy', dx', dy']
-		boundary = newBoundary
-			& boundaryOrigin .~ Vector3 ox oy 0
-			& boundarySize .~ Vector3 dx dy 0
+-- octreeObjectBox :: ObjectId -> (Float, Float) -> (Float, Float) -> OctreeObject
+-- octreeObjectBox oId (ox', oy') (dx', dy') = newOctreeObject
+-- 		& ooObjectId .~ oId
+-- 		& ooBoundary .~ boundary
+--                 & 
+-- 		& ooRealBoundary .~ realBoundary
+-- 	where
+-- 		[ox, oy, dx, dy] = map float2Double [ox', oy', dx', dy']
+-- 		boundary = newBoundary
+-- 			& boundaryOrigin .~ Vector3 ox oy 0
+-- 			& boundarySize .~ Vector3 dx dy 0
 
-		realBoundary = newRealBoundary & rbLines .~ objectBound
+-- 		realBoundary = newRealBoundary & rbLines .~ objectBound
 
-		objectBound =
-			[ Vector3 ox oy 0
-			, Vector3 ox (oy + dy) 0
-			, Vector3 (ox + dx) (oy + dy) 0
-			, Vector3 (ox + dx) oy 0
-			]
+-- 		objectBound =
+-- 			[ Vector3 ox oy 0
+-- 			, Vector3 ox (oy + dy) 0
+-- 			, Vector3 (ox + dx) (oy + dy) 0
+-- 			, Vector3 (ox + dx) oy 0
+-- 			]
 
 -- calculates an axis aligned boundary for the object
 -- used for objects that can rotate
-octreeObjectFromPoints :: ObjectId -> [(Float, Float)] -> OctreeObject
-octreeObjectFromPoints oId points = newOctreeObject
+octreeObjectFromPoints :: ObjectId -> (Float, Float) -> [(Float, Float)] -> OctreeObject
+octreeObjectFromPoints oId pos points = newOctreeObject
 		& ooObjectId .~ oId
-		& ooBoundary .~ boundary
-		& ooRealBoundary .~ realBoundary
-	where
-		xs = map (float2Double . fst) points
-		ys = map (float2Double . snd) points
-		(minX, maxX) = (minimum xs, maximum xs)
-		(minY, maxY) = (minimum ys, maximum ys)
-		boundary = newBoundary
-			& boundaryOrigin .~ Vector3 minX minY 0
-			& boundarySize .~ Vector3 (maxX - minX) (maxY - minY) 0
+                & ooPosition .~ pos
+                & ooBaseBoundary .~ points
+        
+                
+mkBoundary :: (Float, Float) -> [(Float, Float)] -> Boundary
+mkBoundary (x, y) points = let
+    xs = map (float2Double . fst) points
+    ys = map (float2Double . snd) points
+    (minX, maxX) = (minimum xs, maximum xs)
+    (minY, maxY) = (minimum ys, maximum ys)
+    boundary = newBoundary
+            & boundaryOrigin .~ Vector3 (minX + float2Double x) (minY + float2Double y) 0
+            & boundarySize .~ Vector3 (maxX - minX) (maxY - minY) 0
+    
+    in boundary
 
 		-- Note: xs and ys were converted to doubles (we can't use points)
-		realBoundary = newRealBoundary & rbLines
-			.~ map (\(x, y) -> Vector3 x y 0) (zip xs ys)
+		-- realBoundary = newRealBoundary & rbLines
+		-- 	.~ map (\(x, y) -> Vector3 x y 0) (zip xs ys)
